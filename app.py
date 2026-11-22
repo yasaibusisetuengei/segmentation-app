@@ -23,6 +23,38 @@ st.set_page_config(
 
 DISPLAY_WIDTH = 750
 
+# 各カラムの下端を揃えるためのCSS
+st.markdown(
+    """
+    <style>
+    div[data-testid="stHorizontalBlock"] {
+        align-items: stretch !important;
+    }
+    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"],
+    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+        display: flex !important;
+        flex-direction: column !important;
+    }
+    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] > div,
+    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] > div,
+    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] div[data-testid="stVerticalBlockBorderWrapper"],
+    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] div[data-testid="stVerticalBlockBorderWrapper"] > div,
+    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] div[data-testid="stVerticalBlock"],
+    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] div[data-testid="stVerticalBlock"] {
+        height: 100% !important;
+        display: flex !important;
+        flex-direction: column !important;
+        flex: 1 1 auto !important;
+    }
+    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] div[data-testid="stVerticalBlock"] > div:last-child,
+    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] div[data-testid="stVerticalBlock"] > div:last-child {
+        margin-top: auto !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ------------------------------------------------------------
 # 色相環カスタムコンポーネント (HTML5 Canvas ドラッグ対応)
 # ------------------------------------------------------------
@@ -211,7 +243,6 @@ HUE_WHEEL_HTML = """<!DOCTYPE html>
   window.addEventListener("message", (event) => {
     if (event.data && event.data.type === "streamlit:render") {
       const args = event.data.args || {};
-      // プリセット変更などPython側から明示的にsync_idが更新されたときのみ値を同期する
       if (typeof args.sync_id === "number" && args.sync_id !== lastSyncId) {
         lastSyncId = args.sync_id;
         if (typeof args.h_min === "number") hMin = args.h_min;
@@ -307,7 +338,6 @@ def create_hsv_mask(
     if h_min <= h_max:
         h_mask = (h >= h_min) & (h <= h_max)
     else:
-        # 赤色など色相が0/179をまたぐ場合
         h_mask = (h >= h_min) | (h <= h_max)
 
     sv_mask = (s >= s_min) & (s <= s_max) & (v >= v_min) & (v <= v_max)
@@ -514,9 +544,11 @@ with tab1:
         with prev_col2:
             st.image((hsv_mask.astype(np.uint8)) * 255, caption="HSVマスク（白黒）", use_container_width=True)
 
-        if st.button("このHSVマスクを②に反映", type="primary", use_container_width=True):
-            st.session_state.work_mask = hsv_mask.copy()
-            st.success("HSVマスクを「②スーパーピクセルで修正」に反映しました。")
+        apply_clicked = st.button("このHSVマスクを②に反映", type="primary", use_container_width=True)
+
+    if apply_clicked:
+        st.session_state.work_mask = hsv_mask.copy()
+        st.success("HSVマスクを「②スーパーピクセルで修正」に反映しました。")
 
 # ------------------------------------------------------------
 # タブ②: スーパーピクセルで修正
@@ -551,8 +583,8 @@ with tab2:
             help="0にするとクリックした1つのスーパーピクセルのみを反転します。",
         )
 
-        with st.spinner("スーパーピクセルを計算中..."):
-            segments, boundaries = compute_superpixels(img_rgb, n_segments, compactness)
+    with st.spinner("スーパーピクセルを計算中..."):
+        segments, boundaries = compute_superpixels(img_rgb, n_segments, compactness)
 
     with col2_main:
         st.subheader("編集画面")
