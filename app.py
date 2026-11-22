@@ -8,6 +8,7 @@ import numpy as np
 import pillow_heif
 import rawpy
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image, ImageOps
 from skimage.segmentation import find_boundaries, slic
 from streamlit_image_coordinates import streamlit_image_coordinates
@@ -19,6 +20,229 @@ st.set_page_config(
     page_title="HSV + スーパーピクセル セグメンテーション",
     layout="wide",
 )
+
+DISPLAY_WIDTH = 750
+
+# ------------------------------------------------------------
+# 色相環カスタムコンポーネント (HTML5 Canvas ドラッグ対応)
+# ------------------------------------------------------------
+HUE_WHEEL_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  body {
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    font-family: sans-serif;
+    background: transparent;
+    user-select: none;
+  }
+  canvas {
+    cursor: grab;
+    touch-action: none;
+  }
+  canvas.dragging {
+    cursor: grabbing;
+  }
+  .info {
+    margin-top: 4px;
+    font-size: 13px;
+    color: #555;
+  }
+</style>
+</head>
+<body>
+  <canvas id="wheel" width="240" height="240"></canvas>
+  <div class="info" id="info">H: 35 ～ 85 (0～179)</div>
+<script>
+  const canvas = document.getElementById("wheel");
+  const ctx = canvas.getContext("2d");
+  const infoEl = document.getElementById("info");
+
+  const cx = 120, cy = 120;
+  const rOuter = 104, rInner = 64;
+  let hMin = 35;
+  let hMax = 85;
+  let dragging = null; // "min" | "max" | "range" | null
+  let dragStartAngle = 0;
+  let startHMin = 35, startHMax = 85;
+
+  function sendMessage(type, data) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*");
+  }
+
+  function hToAngle(h) {
+    // H: 0..179 -> 0..2*PI (0は上: -PI/2)
+    return (h / 180) * Math.PI * 2 - Math.PI / 2;
+  }
+
+  function angleToH(angle) {
+    let deg = ((angle + Math.PI / 2) * 180 / Math.PI) % 360;
+    if (deg < 0) deg += 360;
+    return Math.round(deg / 2) % 180;
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // 色相環リングを描画
+    for (let deg = 0; deg < 360; deg++) {
+      const a0 = (deg - 0.8) * Math.PI / 180 - Math.PI / 2;
+      const a1 = (deg + 0.8) * Math.PI / 180 - Math.PI / 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, rOuter, a0, a1);
+      ctx.arc(cx, cy, rInner, a1, a0, true);
+      ctx.closePath();
+      ctx.fillStyle = `hsl(${deg}, 100%, 50%)`;
+      ctx.fill();
+    }
+
+    // 選択範囲の扇形ハイライト
+    const aMin = hToAngle(hMin);
+    const aMax = hToAngle(hMax);
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, rInner - 4, aMin, aMax, false);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(0, 160, 255, 0.22)";
+    ctx.fill();
+
+    // 境界線とハンドル描画
+    function drawHandle(h, label, color) {
+      const a = hToAngle(h);
+      const x1 = cx + Math.cos(a) * 12;
+      const y1 = cy + Math.sin(a) * 12;
+      const x2 = cx + Math.cos(a) * (rOuter + 4);
+      const y2 = cy + Math.sin(a) * (rOuter + 4);
+
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(x2, y2);
+      ctx.strokeStyle = "#111";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      const hx = cx + Math.cos(a) * ((rOuter + rInner) / 2);
+      const hy = cy + Math.sin(a) * ((rOuter + rInner) / 2);
+      ctx.beginPath();
+      ctx.arc(hx, hy, 8, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#111";
+      ctx.stroke();
+    }
+
+    drawHandle(hMin, "min", "#ffffff");
+    drawHandle(hMax, "max", "#ffeb3b");
+
+    infoEl.textContent = `H (色相): ${hMin} ～ ${hMax}  (ドラッグで範囲調整)`;
+  }
+
+  function getPointerPos(e) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
+
+  function handleDist(h, px, py) {
+    const a = hToAngle(h);
+    const hx = cx + Math.cos(a) * ((rOuter + rInner) / 2);
+    const hy = cy + Math.sin(a) * ((rOuter + rInner) / 2);
+    return Math.hypot(px - hx, py - hy);
+  }
+
+  canvas.addEventListener("pointerdown", (e) => {
+    const { x, y } = getPointerPos(e);
+    const dMin = handleDist(hMin, x, y);
+    const dMax = handleDist(hMax, x, y);
+
+    if (dMin < 18 && dMin <= dMax) {
+      dragging = "min";
+    } else if (dMax < 18) {
+      dragging = "max";
+    } else {
+      const dist = Math.hypot(x - cx, y - cy);
+      if (dist <= rOuter + 10) {
+        dragging = "range";
+        dragStartAngle = Math.atan2(y - cy, x - cx);
+        startHMin = hMin;
+        startHMax = hMax;
+      }
+    }
+    if (dragging) {
+      canvas.setPointerCapture(e.pointerId);
+      canvas.classList.add("dragging");
+    }
+  });
+
+  canvas.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    const { x, y } = getPointerPos(e);
+    const angle = Math.atan2(y - cy, x - cx);
+
+    if (dragging === "min") {
+      hMin = angleToH(angle);
+    } else if (dragging === "max") {
+      hMax = angleToH(angle);
+    } else if (dragging === "range") {
+      const diffRad = angle - dragStartAngle;
+      const diffH = Math.round((diffRad / (Math.PI * 2)) * 180);
+      hMin = ((startHMin + diffH) % 180 + 180) % 180;
+      hMax = ((startHMax + diffH) % 180 + 180) % 180;
+    }
+    draw();
+  });
+
+  function endDrag() {
+    if (!dragging) return;
+    dragging = null;
+    canvas.classList.remove("dragging");
+    sendMessage("streamlit:setComponentValue", {
+      value: { h_min: hMin, h_max: hMax },
+      dataType: "json",
+    });
+  }
+
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", endDrag);
+
+  window.addEventListener("message", (event) => {
+    if (event.data && event.data.type === "streamlit:render") {
+      const args = event.data.args || {};
+      if (typeof args.h_min === "number") hMin = args.h_min;
+      if (typeof args.h_max === "number") hMax = args.h_max;
+      draw();
+      sendMessage("streamlit:setFrameHeight", { height: 270 });
+    }
+  });
+
+  draw();
+  sendMessage("streamlit:componentReady", { apiVersion: 1 });
+  sendMessage("streamlit:setFrameHeight", { height: 270 });
+</script>
+</body>
+</html>
+"""
+
+
+@st.cache_resource
+def get_hue_wheel_component():
+    comp_dir = os.path.join(tempfile.gettempdir(), "st_hue_wheel_component")
+    os.makedirs(comp_dir, exist_ok=True)
+    index_path = os.path.join(comp_dir, "index.html")
+    with open(index_path, "w", encoding="utf-8") as f:
+        f.write(HUE_WHEEL_HTML)
+    return components.declare_component("hue_wheel", path=comp_dir)
+
+
+hue_wheel_component = get_hue_wheel_component()
 
 
 # ------------------------------------------------------------
@@ -40,7 +264,6 @@ def load_image_rgb(file_bytes: bytes, filename: str) -> np.ndarray:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
-    # .jpg, .jpeg, .png, .heic, .heif など
     img = Image.open(io.BytesIO(file_bytes))
     img = ImageOps.exif_transpose(img).convert("RGB")
     return np.array(img, dtype=np.uint8)
@@ -92,25 +315,6 @@ def create_hsv_mask(
     return h_mask & sv_mask
 
 
-def snap_mask_to_superpixels(
-    mask: np.ndarray,
-    segments: np.ndarray,
-    threshold: float = 0.5,
-) -> np.ndarray:
-    """各スーパーピクセル内のマスク割合がthreshold以上ならそのスーパーピクセル全体を塗りつぶす"""
-    flat_seg = segments.ravel()
-    flat_mask = mask.ravel().astype(np.float32)
-
-    total_counts = np.bincount(flat_seg)
-    mask_counts = np.bincount(flat_seg, weights=flat_mask)
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ratios = np.where(total_counts > 0, mask_counts / total_counts, 0.0)
-
-    active_labels = ratios >= threshold
-    return active_labels[segments]
-
-
 # ------------------------------------------------------------
 # 描画・オーバーレイ生成
 # ------------------------------------------------------------
@@ -158,14 +362,31 @@ def encode_png(img_array: np.ndarray) -> bytes:
 
 
 # ------------------------------------------------------------
+# 色プリセット定義
+# ------------------------------------------------------------
+COLOR_PRESETS = {
+    "緑": ((35, 85), (40, 255), (40, 255)),
+    "赤": ((170, 10), (70, 255), (50, 255)),
+    "青": ((95, 130), (50, 255), (50, 255)),
+    "黄": ((18, 35), (70, 255), (70, 255)),
+    "白": ((0, 179), (0, 50), (200, 255)),
+    "黒": ((0, 179), (0, 255), (0, 50)),
+}
+
+
+# ------------------------------------------------------------
 # セッション状態初期化
 # ------------------------------------------------------------
 def init_state():
     defaults = {
         "file_key": None,
         "work_mask": None,
-        "history": [],
         "last_click": None,
+        "last_preset": "緑",
+        "h_min": 35,
+        "h_max": 85,
+        "s_range": (40, 255),
+        "v_range": (40, 255),
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -178,7 +399,7 @@ init_state()
 # メインUI
 # ------------------------------------------------------------
 st.title("HSV + スーパーピクセル セグメンテーションアプリ")
-st.caption("タブ①でHSV値により大雑把にマスクし、タブ②でスーパーピクセル単位の修正とダウンロードを行います。")
+st.caption("タブ①でHSV値により大雑把にマスクし、タブ②でスーパーピクセル単位で修正、タブ③でマスク画像をダウンロードできます。")
 
 uploaded_file = st.file_uploader(
     "画像をアップロード (.jpg / .jpeg / .png / .heic / .cr2)",
@@ -197,9 +418,10 @@ with st.spinner("画像を読み込んでいます..."):
 
 img_h, img_w = img_rgb.shape[:2]
 
-tab1, tab2 = st.tabs([
+tab1, tab2, tab3 = st.tabs([
     "① HSVでマスク作成",
-    "② スーパーピクセルで修正・③ ダウンロード",
+    "②スーパーピクセルで修正",
+    "③マスク出力・ダウンロード",
 ])
 
 # ------------------------------------------------------------
@@ -209,42 +431,49 @@ with tab1:
     col1_ctrl, col1_view = st.columns([1, 2])
 
     with col1_ctrl:
-        st.subheader("① HSVマスク設定")
+        st.subheader("設定")
         preset = st.selectbox(
             "色プリセット",
-            ["カスタム", "緑（葉・植物）", "赤（色相またぎ）", "青（空・水）"],
+            ["緑", "赤", "青", "黄", "白", "黒", "カスタム"],
         )
 
-        if preset == "緑（葉・植物）":
-            def_h, def_s, def_v = (35, 85), (40, 255), (40, 255)
-        elif preset == "赤（色相またぎ）":
-            def_h, def_s, def_v = (170, 10), (70, 255), (50, 255)
-        elif preset == "青（空・水）":
-            def_h, def_s, def_v = (95, 130), (50, 255), (50, 255)
-        else:
-            def_h, def_s, def_v = (35, 85), (40, 255), (40, 255)
+        if preset != st.session_state.last_preset:
+            st.session_state.last_preset = preset
+            if preset in COLOR_PRESETS:
+                (h0, h1), s_def, v_def = COLOR_PRESETS[preset]
+                st.session_state.h_min = h0
+                st.session_state.h_max = h1
+                st.session_state.s_range = s_def
+                st.session_state.v_range = v_def
 
-        h_min = st.slider("H (色相) 最小", 0, 179, def_h[0])
-        h_max = st.slider("H (色相) 最大", 0, 179, def_h[1])
-        s_min, s_max = st.slider("S (彩度) 範囲", 0, 255, def_s)
-        v_min, v_max = st.slider("V (明度) 範囲", 0, 255, def_v)
+        st.markdown("**H (色相) 範囲**（色相環のハンドルまたは範囲をドラッグ）")
+        wheel_val = hue_wheel_component(
+            h_min=st.session_state.h_min,
+            h_max=st.session_state.h_max,
+            key="hue_wheel_widget",
+        )
+        if isinstance(wheel_val, dict) and "h_min" in wheel_val and "h_max" in wheel_val:
+            st.session_state.h_min = int(wheel_val["h_min"])
+            st.session_state.h_max = int(wheel_val["h_max"])
 
-        hsv_mask = create_hsv_mask(img_rgb, h_min, h_max, s_min, s_max, v_min, v_max)
-        hsv_ratio = float(np.mean(hsv_mask) * 100.0)
-        st.metric("HSV抽出面積率", f"{hsv_ratio:.2f}%")
+        s_min, s_max = st.slider("S (彩度) 範囲", 0, 255, key="s_range")
+        v_min, v_max = st.slider("V (明度) 範囲", 0, 255, key="v_range")
+
+        hsv_mask = create_hsv_mask(
+            img_rgb,
+            st.session_state.h_min,
+            st.session_state.h_max,
+            s_min,
+            s_max,
+            v_min,
+            v_max,
+        )
 
         # 新しい画像が読み込まれたら初期マスクをセット
         if st.session_state.file_key != file_key:
             st.session_state.file_key = file_key
             st.session_state.work_mask = hsv_mask.copy()
-            st.session_state.history = []
             st.session_state.last_click = None
-
-        if st.button("このHSVマスクを②の作業用マスクに反映", type="primary", use_container_width=True):
-            if st.session_state.work_mask is not None:
-                st.session_state.history.append(st.session_state.work_mask.copy())
-            st.session_state.work_mask = hsv_mask.copy()
-            st.success("HSVマスクを作業用マスクに反映しました。「② スーパーピクセルで修正」タブへ進んでください。")
 
     with col1_view:
         st.subheader("HSVマスクプレビュー")
@@ -262,14 +491,18 @@ with tab1:
         with prev_col2:
             st.image((hsv_mask.astype(np.uint8)) * 255, caption="HSVマスク（白黒）", use_container_width=True)
 
+        if st.button("このHSVマスクを②に反映", type="primary", use_container_width=True):
+            st.session_state.work_mask = hsv_mask.copy()
+            st.success("HSVマスクを「②スーパーピクセルで修正」に反映しました。")
+
 # ------------------------------------------------------------
-# タブ②: スーパーピクセルで修正 & ダウンロード
+# タブ②: スーパーピクセルで修正
 # ------------------------------------------------------------
 with tab2:
-    col2_ctrl, col2_main, col2_out = st.columns([1, 2, 1])
+    col2_ctrl, col2_main = st.columns([1, 2.5])
 
     with col2_ctrl:
-        st.subheader("②・④ スーパーピクセル設定")
+        st.subheader("設定")
         n_segments = st.slider(
             "スーパーピクセルの粒度（分割数）",
             min_value=50,
@@ -286,52 +519,30 @@ with tab2:
             step=1.0,
         )
         show_boundaries = st.checkbox("スーパーピクセル境界線を表示", value=True)
-        snap_threshold = st.slider("HSVスナップ閾値（領域内の割合）", 0.1, 0.9, 0.5, 0.05)
 
         with st.spinner("スーパーピクセルを計算中..."):
             segments, boundaries = compute_superpixels(img_rgb, n_segments, compactness)
 
         st.divider()
         st.subheader("編集ツール")
-        edit_mode = st.radio(
-            "クリック時の動作",
-            ["追加（塗る）", "削除（消す）", "反転（トグル）"],
-        )
         brush_radius = st.slider(
-            "ブラシ半径 (px・元画像基準)",
+            "まとめてピクセルを選択",
             min_value=0,
             max_value=100,
             value=0,
             step=5,
-            help="0にするとクリックした1つのスーパーピクセルのみを変更します。",
+            help="0にするとクリックした1つのスーパーピクセルのみを反転します。",
         )
-        display_width = st.slider("表示サイズ (px)", 400, 1200, 750, 50)
-
-        st.divider()
-        if st.button("HSVマスクをスーパーピクセルにスナップ", use_container_width=True):
-            st.session_state.history.append(st.session_state.work_mask.copy())
-            st.session_state.work_mask = snap_mask_to_superpixels(hsv_mask, segments, snap_threshold)
-
-        if st.button("HSVマスクで初期化（ピクセル）", use_container_width=True):
-            st.session_state.history.append(st.session_state.work_mask.copy())
-            st.session_state.work_mask = hsv_mask.copy()
-
-        if st.button("1つ前に戻る (Undo)", use_container_width=True, disabled=len(st.session_state.history) == 0):
-            st.session_state.work_mask = st.session_state.history.pop()
-
-        if st.button("マスクを全消去", use_container_width=True):
-            st.session_state.history.append(st.session_state.work_mask.copy())
-            st.session_state.work_mask = np.zeros((img_h, img_w), dtype=bool)
 
     with col2_main:
-        st.subheader("スーパーピクセル編集キャンバス（クリックで追加/削除）")
+        st.subheader("スーパーピクセル編集キャンバス（クリックで反転）")
         overlay_img = render_overlay(
             img_rgb,
             st.session_state.work_mask,
             boundaries,
             show_boundaries=show_boundaries,
         )
-        disp_img, scale = resize_for_display(overlay_img, display_width)
+        disp_img, scale = resize_for_display(overlay_img, DISPLAY_WIDTH)
 
         coords = streamlit_image_coordinates(
             Image.fromarray(disp_img),
@@ -339,16 +550,12 @@ with tab2:
         )
 
         if coords is not None:
-            click_sig = (coords["x"], coords["y"], edit_mode, brush_radius, n_segments)
+            click_sig = (coords["x"], coords["y"], brush_radius, n_segments)
             if st.session_state.last_click != click_sig:
                 st.session_state.last_click = click_sig
 
                 orig_x = int(np.clip(round(coords["x"] / scale), 0, img_w - 1))
                 orig_y = int(np.clip(round(coords["y"] / scale), 0, img_h - 1))
-
-                st.session_state.history.append(st.session_state.work_mask.copy())
-                if len(st.session_state.history) > 30:
-                    st.session_state.history.pop(0)
 
                 if brush_radius == 0:
                     target_label = segments[orig_y, orig_x]
@@ -359,25 +566,32 @@ with tab2:
                     target_labels = np.unique(segments[circle])
                     target_region = np.isin(segments, target_labels)
 
-                if edit_mode == "追加（塗る）":
-                    st.session_state.work_mask[target_region] = True
-                elif edit_mode == "削除（消す）":
-                    st.session_state.work_mask[target_region] = False
-                else:
-                    center_val = st.session_state.work_mask[orig_y, orig_x]
-                    st.session_state.work_mask[target_region] = not center_val
+                # 常に反転モード
+                center_val = st.session_state.work_mask[orig_y, orig_x]
+                st.session_state.work_mask[target_region] = not center_val
 
                 st.rerun()
 
-    with col2_out:
-        st.subheader("③ マスク出力・ダウンロード")
-        binary_mask_u8 = (st.session_state.work_mask.astype(np.uint8)) * 255
+# ------------------------------------------------------------
+# タブ③: マスク出力・ダウンロード
+# ------------------------------------------------------------
+with tab3:
+    st.subheader("③ マスク出力・ダウンロード")
+    binary_mask_u8 = (st.session_state.work_mask.astype(np.uint8)) * 255
+    final_overlay = render_overlay(img_rgb, st.session_state.work_mask, None, show_boundaries=False)
+
+    out_col1, out_col2 = st.columns(2)
+    with out_col1:
         st.image(binary_mask_u8, caption="最終マスク画像（白黒）", use_container_width=True)
+    with out_col2:
+        st.image(final_overlay, caption="最終オーバーレイ画像", use_container_width=True)
 
-        mask_ratio = float(np.mean(st.session_state.work_mask) * 100.0)
-        st.metric("マスク面積率", f"{mask_ratio:.2f}%")
+    mask_ratio = float(np.mean(st.session_state.work_mask) * 100.0)
+    st.metric("マスク面積率", f"{mask_ratio:.2f}%")
 
-        base_name = os.path.splitext(uploaded_file.name)[0]
+    base_name = os.path.splitext(uploaded_file.name)[0]
+    dl_col1, dl_col2 = st.columns(2)
+    with dl_col1:
         st.download_button(
             label="マスク画像をダウンロード (PNG)",
             data=encode_png(binary_mask_u8),
@@ -386,8 +600,7 @@ with tab2:
             type="primary",
             use_container_width=True,
         )
-
-        final_overlay = render_overlay(img_rgb, st.session_state.work_mask, None, show_boundaries=False)
+    with dl_col2:
         st.download_button(
             label="オーバーレイ画像をダウンロード (PNG)",
             data=encode_png(final_overlay),
