@@ -89,7 +89,7 @@ def create_hsv_mask(
         h_mask = (h >= h_min) | (h <= h_max)
 
     sv_mask = (s >= s_min) & (s <= s_max) & (v >= v_min) & (v <= v_max)
-    return (h_mask & sv_mask)
+    return h_mask & sv_mask
 
 
 def snap_mask_to_superpixels(
@@ -143,7 +143,11 @@ def resize_for_display(img: np.ndarray, max_width: int) -> Tuple[np.ndarray, flo
         return img, 1.0
     scale = max_width / float(w)
     new_h = int(round(h * scale))
-    resized = cv2.resize(img, (max_width, new_h), interpolation=cv2.INTER_NEAREST if img.ndim == 2 else cv2.INTER_AREA)
+    resized = cv2.resize(
+        img,
+        (max_width, new_h),
+        interpolation=cv2.INTER_NEAREST if img.ndim == 2 else cv2.INTER_AREA,
+    )
     return resized, scale
 
 
@@ -174,7 +178,7 @@ init_state()
 # メインUI
 # ------------------------------------------------------------
 st.title("HSV + スーパーピクセル セグメンテーションアプリ")
-st.caption("① HSV色空間で初期マスクを作成し、② スーパーピクセル単位で修正して、③ マスク画像をダウンロードできます。")
+st.caption("タブ①でHSV値により大雑把にマスクし、タブ②でスーパーピクセル単位の修正とダウンロードを行います。")
 
 uploaded_file = st.file_uploader(
     "画像をアップロード (.jpg / .jpeg / .png / .heic / .cr2)",
@@ -193,182 +197,201 @@ with st.spinner("画像を読み込んでいます..."):
 
 img_h, img_w = img_rgb.shape[:2]
 
-# ------------------------------------------------------------
-# サイドバー設定
-# ------------------------------------------------------------
-with st.sidebar:
-    st.header("① HSVマスク設定")
-    preset = st.selectbox(
-        "色プリセット",
-        ["カスタム", "緑（葉・植物）", "赤（色相またぎ）", "青（空・水）"],
-    )
-
-    if preset == "緑（葉・植物）":
-        def_h, def_s, def_v = (35, 85), (40, 255), (40, 255)
-    elif preset == "赤（色相またぎ）":
-        def_h, def_s, def_v = (170, 10), (70, 255), (50, 255)
-    elif preset == "青（空・水）":
-        def_h, def_s, def_v = (95, 130), (50, 255), (50, 255)
-    else:
-        def_h, def_s, def_v = (35, 85), (40, 255), (40, 255)
-
-    h_min = st.slider("H (色相) 最小", 0, 179, def_h[0])
-    h_max = st.slider("H (色相) 最大", 0, 179, def_h[1])
-    s_min, s_max = st.slider("S (彩度) 範囲", 0, 255, def_s)
-    v_min, v_max = st.slider("V (明度) 範囲", 0, 255, def_v)
-
-    hsv_mask = create_hsv_mask(img_rgb, h_min, h_max, s_min, s_max, v_min, v_max)
-
-    st.divider()
-    st.header("②・④ スーパーピクセル設定")
-    n_segments = st.slider(
-        "スーパーピクセルの粒度（分割数）",
-        min_value=50,
-        max_value=1500,
-        value=250,
-        step=10,
-        help="数値が大きいほどスーパーピクセルが細かくなります。",
-    )
-    compactness = st.slider(
-        "コンパクトネス（形状の均一さ）",
-        min_value=1.0,
-        max_value=40.0,
-        value=10.0,
-        step=1.0,
-    )
-    show_boundaries = st.checkbox("スーパーピクセル境界線を表示", value=True)
-    snap_threshold = st.slider("HSVスナップ閾値（領域内の割合）", 0.1, 0.9, 0.5, 0.05)
-
-    with st.spinner("スーパーピクセルを計算中..."):
-        segments, boundaries = compute_superpixels(img_rgb, n_segments, compactness)
-
-    st.divider()
-    st.header("編集ツール")
-    edit_mode = st.radio(
-        "クリック時の動作",
-        ["追加（塗る）", "削除（消す）", "反転（トグル）"],
-        horizontal=False,
-    )
-    brush_radius = st.slider(
-        "ブラシ半径 (px・元画像基準)",
-        min_value=0,
-        max_value=100,
-        value=0,
-        step=5,
-        help="0にするとクリックした1つのスーパーピクセルのみを変更します。",
-    )
-    display_width = st.slider("表示サイズ (px)", 400, 1200, 750, 50)
-
-# 新しい画像が読み込まれたら初期マスクをセット
-if st.session_state.file_key != file_key:
-    st.session_state.file_key = file_key
-    st.session_state.work_mask = snap_mask_to_superpixels(hsv_mask, segments, snap_threshold)
-    st.session_state.history = []
-    st.session_state.last_click = None
+tab1, tab2 = st.tabs([
+    "① HSVでマスク作成",
+    "② スーパーピクセルで修正・③ ダウンロード",
+])
 
 # ------------------------------------------------------------
-# 操作ボタンバー
+# タブ①: HSV値に従って大雑把に分ける
 # ------------------------------------------------------------
-col_b1, col_b2, col_b3, col_b4 = st.columns(4)
+with tab1:
+    col1_ctrl, col1_view = st.columns([1, 2])
 
-with col_b1:
-    if st.button("HSVマスクで初期化（ピクセル）", use_container_width=True):
-        st.session_state.history.append(st.session_state.work_mask.copy())
-        st.session_state.work_mask = hsv_mask.copy()
+    with col1_ctrl:
+        st.subheader("① HSVマスク設定")
+        preset = st.selectbox(
+            "色プリセット",
+            ["カスタム", "緑（葉・植物）", "赤（色相またぎ）", "青（空・水）"],
+        )
 
-with col_b2:
-    if st.button("HSVマスクをスーパーピクセルにスナップ", use_container_width=True):
-        st.session_state.history.append(st.session_state.work_mask.copy())
-        st.session_state.work_mask = snap_mask_to_superpixels(hsv_mask, segments, snap_threshold)
+        if preset == "緑（葉・植物）":
+            def_h, def_s, def_v = (35, 85), (40, 255), (40, 255)
+        elif preset == "赤（色相またぎ）":
+            def_h, def_s, def_v = (170, 10), (70, 255), (50, 255)
+        elif preset == "青（空・水）":
+            def_h, def_s, def_v = (95, 130), (50, 255), (50, 255)
+        else:
+            def_h, def_s, def_v = (35, 85), (40, 255), (40, 255)
 
-with col_b3:
-    if st.button("1つ前に戻る (Undo)", use_container_width=True, disabled=len(st.session_state.history) == 0):
-        st.session_state.work_mask = st.session_state.history.pop()
+        h_min = st.slider("H (色相) 最小", 0, 179, def_h[0])
+        h_max = st.slider("H (色相) 最大", 0, 179, def_h[1])
+        s_min, s_max = st.slider("S (彩度) 範囲", 0, 255, def_s)
+        v_min, v_max = st.slider("V (明度) 範囲", 0, 255, def_v)
 
-with col_b4:
-    if st.button("マスクを全消去", use_container_width=True):
-        st.session_state.history.append(st.session_state.work_mask.copy())
-        st.session_state.work_mask = np.zeros((img_h, img_w), dtype=bool)
+        hsv_mask = create_hsv_mask(img_rgb, h_min, h_max, s_min, s_max, v_min, v_max)
+        hsv_ratio = float(np.mean(hsv_mask) * 100.0)
+        st.metric("HSV抽出面積率", f"{hsv_ratio:.2f}%")
+
+        # 新しい画像が読み込まれたら初期マスクをセット
+        if st.session_state.file_key != file_key:
+            st.session_state.file_key = file_key
+            st.session_state.work_mask = hsv_mask.copy()
+            st.session_state.history = []
+            st.session_state.last_click = None
+
+        if st.button("このHSVマスクを②の作業用マスクに反映", type="primary", use_container_width=True):
+            if st.session_state.work_mask is not None:
+                st.session_state.history.append(st.session_state.work_mask.copy())
+            st.session_state.work_mask = hsv_mask.copy()
+            st.success("HSVマスクを作業用マスクに反映しました。「② スーパーピクセルで修正」タブへ進んでください。")
+
+    with col1_view:
+        st.subheader("HSVマスクプレビュー")
+        prev_col1, prev_col2 = st.columns(2)
+        with prev_col1:
+            hsv_preview = render_overlay(
+                img_rgb,
+                hsv_mask,
+                None,
+                mask_color=(0, 200, 255),
+                mask_alpha=0.5,
+                show_boundaries=False,
+            )
+            st.image(hsv_preview, caption="元画像 + HSVマスク（水色）", use_container_width=True)
+        with prev_col2:
+            st.image((hsv_mask.astype(np.uint8)) * 255, caption="HSVマスク（白黒）", use_container_width=True)
 
 # ------------------------------------------------------------
-# メイン表示エリア (左: 編集キャンバス / 右: HSVプレビュー & 最終マスク)
+# タブ②: スーパーピクセルで修正 & ダウンロード
 # ------------------------------------------------------------
-col_main, col_side = st.columns([2, 1])
+with tab2:
+    col2_ctrl, col2_main, col2_out = st.columns([1, 2, 1])
 
-with col_main:
-    st.subheader("スーパーピクセル編集キャンバス（画像をクリックして修正）")
-    overlay_img = render_overlay(
-        img_rgb,
-        st.session_state.work_mask,
-        boundaries,
-        show_boundaries=show_boundaries,
-    )
-    disp_img, scale = resize_for_display(overlay_img, display_width)
+    with col2_ctrl:
+        st.subheader("②・④ スーパーピクセル設定")
+        n_segments = st.slider(
+            "スーパーピクセルの粒度（分割数）",
+            min_value=50,
+            max_value=1500,
+            value=250,
+            step=10,
+            help="数値が大きいほどスーパーピクセルが細かくなります。",
+        )
+        compactness = st.slider(
+            "コンパクトネス（形状の均一さ）",
+            min_value=1.0,
+            max_value=40.0,
+            value=10.0,
+            step=1.0,
+        )
+        show_boundaries = st.checkbox("スーパーピクセル境界線を表示", value=True)
+        snap_threshold = st.slider("HSVスナップ閾値（領域内の割合）", 0.1, 0.9, 0.5, 0.05)
 
-    coords = streamlit_image_coordinates(
-        Image.fromarray(disp_img),
-        key="sp_canvas",
-    )
+        with st.spinner("スーパーピクセルを計算中..."):
+            segments, boundaries = compute_superpixels(img_rgb, n_segments, compactness)
 
-    if coords is not None:
-        click_sig = (coords["x"], coords["y"], edit_mode, brush_radius, n_segments)
-        if st.session_state.last_click != click_sig:
-            st.session_state.last_click = click_sig
+        st.divider()
+        st.subheader("編集ツール")
+        edit_mode = st.radio(
+            "クリック時の動作",
+            ["追加（塗る）", "削除（消す）", "反転（トグル）"],
+        )
+        brush_radius = st.slider(
+            "ブラシ半径 (px・元画像基準)",
+            min_value=0,
+            max_value=100,
+            value=0,
+            step=5,
+            help="0にするとクリックした1つのスーパーピクセルのみを変更します。",
+        )
+        display_width = st.slider("表示サイズ (px)", 400, 1200, 750, 50)
 
-            orig_x = int(np.clip(round(coords["x"] / scale), 0, img_w - 1))
-            orig_y = int(np.clip(round(coords["y"] / scale), 0, img_h - 1))
-
+        st.divider()
+        if st.button("HSVマスクをスーパーピクセルにスナップ", use_container_width=True):
             st.session_state.history.append(st.session_state.work_mask.copy())
-            if len(st.session_state.history) > 30:
-                st.session_state.history.pop(0)
+            st.session_state.work_mask = snap_mask_to_superpixels(hsv_mask, segments, snap_threshold)
 
-            if brush_radius == 0:
-                target_labels = [segments[orig_y, orig_x]]
-                target_region = segments == target_labels[0]
-            else:
-                yy, xx = np.ogrid[:img_h, :img_w]
-                circle = (xx - orig_x) ** 2 + (yy - orig_y) ** 2 <= brush_radius ** 2
-                target_labels = np.unique(segments[circle])
-                target_region = np.isin(segments, target_labels)
+        if st.button("HSVマスクで初期化（ピクセル）", use_container_width=True):
+            st.session_state.history.append(st.session_state.work_mask.copy())
+            st.session_state.work_mask = hsv_mask.copy()
 
-            if edit_mode == "追加（塗る）":
-                st.session_state.work_mask[target_region] = True
-            elif edit_mode == "削除（消す）":
-                st.session_state.work_mask[target_region] = False
-            else:
-                center_val = st.session_state.work_mask[orig_y, orig_x]
-                st.session_state.work_mask[target_region] = not center_val
+        if st.button("1つ前に戻る (Undo)", use_container_width=True, disabled=len(st.session_state.history) == 0):
+            st.session_state.work_mask = st.session_state.history.pop()
 
-            st.rerun()
+        if st.button("マスクを全消去", use_container_width=True):
+            st.session_state.history.append(st.session_state.work_mask.copy())
+            st.session_state.work_mask = np.zeros((img_h, img_w), dtype=bool)
 
-with col_side:
-    st.subheader("① HSVマスクプレビュー")
-    hsv_preview = render_overlay(img_rgb, hsv_mask, None, mask_color=(0, 200, 255), mask_alpha=0.5, show_boundaries=False)
-    st.image(hsv_preview, use_container_width=True)
+    with col2_main:
+        st.subheader("スーパーピクセル編集キャンバス（クリックで追加/削除）")
+        overlay_img = render_overlay(
+            img_rgb,
+            st.session_state.work_mask,
+            boundaries,
+            show_boundaries=show_boundaries,
+        )
+        disp_img, scale = resize_for_display(overlay_img, display_width)
 
-    st.subheader("③ 生成されたマスク画像（白黒）")
-    binary_mask_u8 = (st.session_state.work_mask.astype(np.uint8)) * 255
-    st.image(binary_mask_u8, use_container_width=True)
+        coords = streamlit_image_coordinates(
+            Image.fromarray(disp_img),
+            key="sp_canvas",
+        )
 
-    mask_ratio = float(np.mean(st.session_state.work_mask) * 100.0)
-    st.metric("マスク面積率", f"{mask_ratio:.2f}%")
+        if coords is not None:
+            click_sig = (coords["x"], coords["y"], edit_mode, brush_radius, n_segments)
+            if st.session_state.last_click != click_sig:
+                st.session_state.last_click = click_sig
 
-    # ダウンロードボタン
-    base_name = os.path.splitext(uploaded_file.name)[0]
-    st.download_button(
-        label="マスク画像をダウンロード (PNG)",
-        data=encode_png(binary_mask_u8),
-        file_name=f"{base_name}_mask.png",
-        mime="image/png",
-        type="primary",
-        use_container_width=True,
-    )
+                orig_x = int(np.clip(round(coords["x"] / scale), 0, img_w - 1))
+                orig_y = int(np.clip(round(coords["y"] / scale), 0, img_h - 1))
 
-    final_overlay = render_overlay(img_rgb, st.session_state.work_mask, None, show_boundaries=False)
-    st.download_button(
-        label="オーバーレイ画像をダウンロード (PNG)",
-        data=encode_png(final_overlay),
-        file_name=f"{base_name}_overlay.png",
-        mime="image/png",
-        use_container_width=True,
-    )
+                st.session_state.history.append(st.session_state.work_mask.copy())
+                if len(st.session_state.history) > 30:
+                    st.session_state.history.pop(0)
+
+                if brush_radius == 0:
+                    target_label = segments[orig_y, orig_x]
+                    target_region = segments == target_label
+                else:
+                    yy, xx = np.ogrid[:img_h, :img_w]
+                    circle = (xx - orig_x) ** 2 + (yy - orig_y) ** 2 <= brush_radius ** 2
+                    target_labels = np.unique(segments[circle])
+                    target_region = np.isin(segments, target_labels)
+
+                if edit_mode == "追加（塗る）":
+                    st.session_state.work_mask[target_region] = True
+                elif edit_mode == "削除（消す）":
+                    st.session_state.work_mask[target_region] = False
+                else:
+                    center_val = st.session_state.work_mask[orig_y, orig_x]
+                    st.session_state.work_mask[target_region] = not center_val
+
+                st.rerun()
+
+    with col2_out:
+        st.subheader("③ マスク出力・ダウンロード")
+        binary_mask_u8 = (st.session_state.work_mask.astype(np.uint8)) * 255
+        st.image(binary_mask_u8, caption="最終マスク画像（白黒）", use_container_width=True)
+
+        mask_ratio = float(np.mean(st.session_state.work_mask) * 100.0)
+        st.metric("マスク面積率", f"{mask_ratio:.2f}%")
+
+        base_name = os.path.splitext(uploaded_file.name)[0]
+        st.download_button(
+            label="マスク画像をダウンロード (PNG)",
+            data=encode_png(binary_mask_u8),
+            file_name=f"{base_name}_mask.png",
+            mime="image/png",
+            type="primary",
+            use_container_width=True,
+        )
+
+        final_overlay = render_overlay(img_rgb, st.session_state.work_mask, None, show_boundaries=False)
+        st.download_button(
+            label="オーバーレイ画像をダウンロード (PNG)",
+            data=encode_png(final_overlay),
+            file_name=f"{base_name}_overlay.png",
+            mime="image/png",
+            use_container_width=True,
+        )
