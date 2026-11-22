@@ -2,6 +2,7 @@ import inspect
 import io
 import os
 import tempfile
+import urllib.request
 from typing import Optional, Tuple
 
 import cv2
@@ -24,6 +25,8 @@ st.set_page_config(
 
 DISPLAY_WIDTH = 600
 WORK_MAX_SIDE = 1024
+SAMPLE_IMAGE_NAME = "IMG_3715.jpg"
+SAMPLE_IMAGE_URL = "https://raw.githubusercontent.com/yasaibusisetuengei/segmentation-app/main/IMG_3715.jpg"
 
 # ------------------------------------------------------------
 # 色相環カスタムコンポーネント (HTML5 Canvas ドラッグ対応)
@@ -249,6 +252,16 @@ hue_wheel_component = get_hue_wheel_component()
 # 画像読み込みユーティリティ (.jpg / .heic / .cr2 対応)
 # ------------------------------------------------------------
 @st.cache_data(show_spinner=False)
+def load_sample_image_bytes() -> bytes:
+    local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), SAMPLE_IMAGE_NAME)
+    if os.path.exists(local_path):
+        with open(local_path, "rb") as f:
+            return f.read()
+    with urllib.request.urlopen(SAMPLE_IMAGE_URL, timeout=15) as resp:
+        return resp.read()
+
+
+@st.cache_data(show_spinner=False)
 def load_image_rgb(file_bytes: bytes, filename: str) -> np.ndarray:
     ext = os.path.splitext(filename)[1].lower()
 
@@ -427,20 +440,38 @@ compress_for_work = st.checkbox(
     help="CR2などの高解像度画像で処理が重い場合に有効にしてください。長辺を最大1024pxに縮小して作業し、ダウンロード時に元画像のサイズへ復元します。",
 )
 
-uploaded_file = st.file_uploader(
-    "画像をアップロード (.jpg / .jpeg / .png / .heic / .cr2)",
-    type=["jpg", "jpeg", "png", "heic", "heif", "cr2"],
+image_source = st.radio(
+    "画像の選択方法",
+    ["ファイルをアップロード", f"サンプル画像 ({SAMPLE_IMAGE_NAME}) を使用"],
+    horizontal=True,
 )
 
-if uploaded_file is None:
-    st.info("上のアップローダーから画像ファイルを選択してください。")
-    st.stop()
+file_bytes: Optional[bytes] = None
+file_name: Optional[str] = None
 
-file_bytes = uploaded_file.getvalue()
-file_key = f"{uploaded_file.name}_{len(file_bytes)}"
+if image_source == "ファイルをアップロード":
+    uploaded_file = st.file_uploader(
+        "画像をアップロード (.jpg / .jpeg / .png / .heic / .cr2)",
+        type=["jpg", "jpeg", "png", "heic", "heif", "cr2"],
+    )
+    if uploaded_file is None:
+        st.info("上のアップローダーから画像ファイルを選択するか、「サンプル画像を使用」を選んでください。")
+        st.stop()
+    file_bytes = uploaded_file.getvalue()
+    file_name = uploaded_file.name
+else:
+    try:
+        with st.spinner("サンプル画像を読み込んでいます..."):
+            file_bytes = load_sample_image_bytes()
+            file_name = SAMPLE_IMAGE_NAME
+    except Exception as e:
+        st.error(f"サンプル画像の読み込みに失敗しました: {e}")
+        st.stop()
+
+file_key = f"{file_name}_{len(file_bytes)}"
 
 with st.spinner("画像を読み込んでいます..."):
-    img_full_rgb = load_image_rgb(file_bytes, uploaded_file.name)
+    img_full_rgb = load_image_rgb(file_bytes, file_name)
 
 orig_h, orig_w = img_full_rgb.shape[:2]
 
@@ -666,7 +697,7 @@ with tab3:
     mask_ratio = float(np.mean(export_mask) * 100.0)
     st.metric("マスク面積率", f"{mask_ratio:.2f}%")
 
-    base_name = os.path.splitext(uploaded_file.name)[0]
+    base_name = os.path.splitext(file_name)[0]
     dl_col1, dl_col2, dl_col3 = st.columns(3)
 
     with dl_col1:
