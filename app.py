@@ -67,6 +67,7 @@ HUE_WHEEL_HTML = """<!DOCTYPE html>
   const rOuter = 104, rInner = 64;
   let hMin = 35;
   let hMax = 85;
+  let lastSyncId = -1;
   let dragging = null; // "min" | "max" | "range" | null
   let dragStartAngle = 0;
   let startHMin = 35, startHMax = 85;
@@ -76,7 +77,6 @@ HUE_WHEEL_HTML = """<!DOCTYPE html>
   }
 
   function hToAngle(h) {
-    // H: 0..179 -> 0..2*PI (0は上: -PI/2)
     return (h / 180) * Math.PI * 2 - Math.PI / 2;
   }
 
@@ -89,7 +89,6 @@ HUE_WHEEL_HTML = """<!DOCTYPE html>
   function draw() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // 色相環リングを描画
     for (let deg = 0; deg < 360; deg++) {
       const a0 = (deg - 0.8) * Math.PI / 180 - Math.PI / 2;
       const a1 = (deg + 0.8) * Math.PI / 180 - Math.PI / 2;
@@ -101,7 +100,6 @@ HUE_WHEEL_HTML = """<!DOCTYPE html>
       ctx.fill();
     }
 
-    // 選択範囲の扇形ハイライト
     const aMin = hToAngle(hMin);
     const aMax = hToAngle(hMax);
     ctx.beginPath();
@@ -111,11 +109,8 @@ HUE_WHEEL_HTML = """<!DOCTYPE html>
     ctx.fillStyle = "rgba(0, 160, 255, 0.22)";
     ctx.fill();
 
-    // 境界線とハンドル描画
-    function drawHandle(h, label, color) {
+    function drawHandle(h, color) {
       const a = hToAngle(h);
-      const x1 = cx + Math.cos(a) * 12;
-      const y1 = cy + Math.sin(a) * 12;
       const x2 = cx + Math.cos(a) * (rOuter + 4);
       const y2 = cy + Math.sin(a) * (rOuter + 4);
 
@@ -140,8 +135,8 @@ HUE_WHEEL_HTML = """<!DOCTYPE html>
       ctx.stroke();
     }
 
-    drawHandle(hMin, "min", "#ffffff");
-    drawHandle(hMax, "max", "#ffeb3b");
+    drawHandle(hMin, "#ffffff");
+    drawHandle(hMax, "#ffeb3b");
 
     infoEl.textContent = `H (色相): ${hMin} ～ ${hMax}  (ドラッグで範囲調整)`;
   }
@@ -216,9 +211,13 @@ HUE_WHEEL_HTML = """<!DOCTYPE html>
   window.addEventListener("message", (event) => {
     if (event.data && event.data.type === "streamlit:render") {
       const args = event.data.args || {};
-      if (typeof args.h_min === "number") hMin = args.h_min;
-      if (typeof args.h_max === "number") hMax = args.h_max;
-      draw();
+      // プリセット変更などPython側から明示的にsync_idが更新されたときのみ値を同期する
+      if (typeof args.sync_id === "number" && args.sync_id !== lastSyncId) {
+        lastSyncId = args.sync_id;
+        if (typeof args.h_min === "number") hMin = args.h_min;
+        if (typeof args.h_max === "number") hMax = args.h_max;
+        draw();
+      }
       sendMessage("streamlit:setFrameHeight", { height: 270 });
     }
   });
@@ -234,12 +233,12 @@ HUE_WHEEL_HTML = """<!DOCTYPE html>
 
 @st.cache_resource
 def get_hue_wheel_component():
-    comp_dir = os.path.join(tempfile.gettempdir(), "st_hue_wheel_component")
+    comp_dir = os.path.join(tempfile.gettempdir(), "st_hue_wheel_component_v2")
     os.makedirs(comp_dir, exist_ok=True)
     index_path = os.path.join(comp_dir, "index.html")
     with open(index_path, "w", encoding="utf-8") as f:
         f.write(HUE_WHEEL_HTML)
-    return components.declare_component("hue_wheel", path=comp_dir)
+    return components.declare_component("hue_wheel_v2", path=comp_dir)
 
 
 hue_wheel_component = get_hue_wheel_component()
@@ -362,7 +361,7 @@ def encode_png(img_array: np.ndarray) -> bytes:
 
 
 # ------------------------------------------------------------
-# 色プリセット定義
+# 色プリセット & マスク表示色定義
 # ------------------------------------------------------------
 COLOR_PRESETS = {
     "緑": ((35, 85), (40, 255), (40, 255)),
@@ -371,6 +370,14 @@ COLOR_PRESETS = {
     "黄": ((18, 35), (70, 255), (70, 255)),
     "白": ((0, 179), (0, 50), (200, 255)),
     "黒": ((0, 179), (0, 255), (0, 50)),
+}
+
+MASK_DISPLAY_COLORS = {
+    "水色": (0, 200, 255),
+    "赤": (255, 60, 0),
+    "緑": (0, 220, 80),
+    "黄": (255, 220, 0),
+    "紫": (180, 60, 255),
 }
 
 
@@ -387,6 +394,8 @@ def init_state():
         "h_max": 85,
         "s_range": (40, 255),
         "v_range": (40, 255),
+        "wheel_sync_id": 0,
+        "last_wheel_val": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -399,7 +408,7 @@ init_state()
 # メインUI
 # ------------------------------------------------------------
 st.title("HSV + スーパーピクセル セグメンテーションアプリ")
-st.caption("タブ①でHSV値により大雑把にマスクし、タブ②でスーパーピクセル単位で修正、タブ③でマスク画像をダウンロードできます。")
+st.caption("タブ①でHSV値により大雑把にマスクし、タブ②でスーパーピクセル単位で修正、ダウンロードタブから保存できます。")
 
 uploaded_file = st.file_uploader(
     "画像をアップロード (.jpg / .jpeg / .png / .heic / .cr2)",
@@ -421,7 +430,7 @@ img_h, img_w = img_rgb.shape[:2]
 tab1, tab2, tab3 = st.tabs([
     "① HSVでマスク作成",
     "②スーパーピクセルで修正",
-    "③マスク出力・ダウンロード",
+    "ダウンロード",
 ])
 
 # ------------------------------------------------------------
@@ -445,14 +454,28 @@ with tab1:
                 st.session_state.h_max = h1
                 st.session_state.s_range = s_def
                 st.session_state.v_range = v_def
+                st.session_state.wheel_sync_id += 1
+
+        mask_color_name = st.selectbox(
+            "マスクの色",
+            list(MASK_DISPLAY_COLORS.keys()),
+        )
+        selected_mask_color = MASK_DISPLAY_COLORS[mask_color_name]
 
         st.markdown("**H (色相) 範囲**（色相環のハンドルまたは範囲をドラッグ）")
         wheel_val = hue_wheel_component(
             h_min=st.session_state.h_min,
             h_max=st.session_state.h_max,
+            sync_id=st.session_state.wheel_sync_id,
             key="hue_wheel_widget",
         )
-        if isinstance(wheel_val, dict) and "h_min" in wheel_val and "h_max" in wheel_val:
+        if (
+            isinstance(wheel_val, dict)
+            and "h_min" in wheel_val
+            and "h_max" in wheel_val
+            and wheel_val != st.session_state.last_wheel_val
+        ):
+            st.session_state.last_wheel_val = wheel_val
             st.session_state.h_min = int(wheel_val["h_min"])
             st.session_state.h_max = int(wheel_val["h_max"])
 
@@ -476,18 +499,18 @@ with tab1:
             st.session_state.last_click = None
 
     with col1_view:
-        st.subheader("HSVマスクプレビュー")
+        st.subheader("プレビュー")
         prev_col1, prev_col2 = st.columns(2)
         with prev_col1:
             hsv_preview = render_overlay(
                 img_rgb,
                 hsv_mask,
                 None,
-                mask_color=(0, 200, 255),
+                mask_color=selected_mask_color,
                 mask_alpha=0.5,
                 show_boundaries=False,
             )
-            st.image(hsv_preview, caption="元画像 + HSVマスク（水色）", use_container_width=True)
+            st.image(hsv_preview, caption=f"元画像 + HSVマスク（{mask_color_name}）", use_container_width=True)
         with prev_col2:
             st.image((hsv_mask.astype(np.uint8)) * 255, caption="HSVマスク（白黒）", use_container_width=True)
 
@@ -499,7 +522,7 @@ with tab1:
 # タブ②: スーパーピクセルで修正
 # ------------------------------------------------------------
 with tab2:
-    col2_ctrl, col2_main = st.columns([1, 2.5])
+    col2_ctrl, col2_main, col2_mask = st.columns([1, 2, 1])
 
     with col2_ctrl:
         st.subheader("設定")
@@ -519,12 +542,6 @@ with tab2:
             step=1.0,
         )
         show_boundaries = st.checkbox("スーパーピクセル境界線を表示", value=True)
-
-        with st.spinner("スーパーピクセルを計算中..."):
-            segments, boundaries = compute_superpixels(img_rgb, n_segments, compactness)
-
-        st.divider()
-        st.subheader("編集ツール")
         brush_radius = st.slider(
             "まとめてピクセルを選択",
             min_value=0,
@@ -534,12 +551,16 @@ with tab2:
             help="0にするとクリックした1つのスーパーピクセルのみを反転します。",
         )
 
+        with st.spinner("スーパーピクセルを計算中..."):
+            segments, boundaries = compute_superpixels(img_rgb, n_segments, compactness)
+
     with col2_main:
-        st.subheader("スーパーピクセル編集キャンバス（クリックで反転）")
+        st.subheader("編集画面")
         overlay_img = render_overlay(
             img_rgb,
             st.session_state.work_mask,
             boundaries,
+            mask_color=selected_mask_color,
             show_boundaries=show_boundaries,
         )
         disp_img, scale = resize_for_display(overlay_img, DISPLAY_WIDTH)
@@ -566,32 +587,48 @@ with tab2:
                     target_labels = np.unique(segments[circle])
                     target_region = np.isin(segments, target_labels)
 
-                # 常に反転モード
                 center_val = st.session_state.work_mask[orig_y, orig_x]
                 st.session_state.work_mask[target_region] = not center_val
 
                 st.rerun()
 
+    with col2_mask:
+        st.subheader("最終マスク画像（白黒）")
+        binary_mask_preview = (st.session_state.work_mask.astype(np.uint8)) * 255
+        st.image(binary_mask_preview, use_container_width=True)
+
 # ------------------------------------------------------------
-# タブ③: マスク出力・ダウンロード
+# タブ③: ダウンロード
 # ------------------------------------------------------------
 with tab3:
-    st.subheader("③ マスク出力・ダウンロード")
+    st.subheader("ダウンロード")
     binary_mask_u8 = (st.session_state.work_mask.astype(np.uint8)) * 255
-    final_overlay = render_overlay(img_rgb, st.session_state.work_mask, None, show_boundaries=False)
-
-    out_col1, out_col2 = st.columns(2)
-    with out_col1:
-        st.image(binary_mask_u8, caption="最終マスク画像（白黒）", use_container_width=True)
-    with out_col2:
-        st.image(final_overlay, caption="最終オーバーレイ画像", use_container_width=True)
+    final_overlay = render_overlay(
+        img_rgb,
+        st.session_state.work_mask,
+        None,
+        mask_color=selected_mask_color,
+        show_boundaries=False,
+    )
 
     mask_ratio = float(np.mean(st.session_state.work_mask) * 100.0)
     st.metric("マスク面積率", f"{mask_ratio:.2f}%")
 
     base_name = os.path.splitext(uploaded_file.name)[0]
-    dl_col1, dl_col2 = st.columns(2)
+    dl_col1, dl_col2, dl_col3 = st.columns(3)
+
     with dl_col1:
+        st.image(img_rgb, caption="元画像", use_container_width=True)
+        st.download_button(
+            label="元画像をダウンロード (PNG)",
+            data=encode_png(img_rgb),
+            file_name=f"{base_name}_original.png",
+            mime="image/png",
+            use_container_width=True,
+        )
+
+    with dl_col2:
+        st.image(binary_mask_u8, caption="最終マスク画像（白黒）", use_container_width=True)
         st.download_button(
             label="マスク画像をダウンロード (PNG)",
             data=encode_png(binary_mask_u8),
@@ -600,7 +637,9 @@ with tab3:
             type="primary",
             use_container_width=True,
         )
-    with dl_col2:
+
+    with dl_col3:
+        st.image(final_overlay, caption="最終オーバーレイ画像", use_container_width=True)
         st.download_button(
             label="オーバーレイ画像をダウンロード (PNG)",
             data=encode_png(final_overlay),
