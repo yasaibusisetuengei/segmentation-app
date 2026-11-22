@@ -23,6 +23,7 @@ st.set_page_config(
 )
 
 DISPLAY_WIDTH = 600
+WORK_MAX_SIDE = 1024
 
 # ------------------------------------------------------------
 # 色相環カスタムコンポーネント (HTML5 Canvas ドラッグ対応)
@@ -268,6 +269,17 @@ def load_image_rgb(file_bytes: bytes, filename: str) -> np.ndarray:
     return np.array(img, dtype=np.uint8)
 
 
+@st.cache_data(show_spinner=False)
+def downscale_for_work(img_rgb: np.ndarray, max_side: int) -> np.ndarray:
+    h, w = img_rgb.shape[:2]
+    if max(h, w) <= max_side:
+        return img_rgb
+    scale = max_side / float(max(h, w))
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    return cv2.resize(img_rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
 # ------------------------------------------------------------
 # スーパーピクセル計算 (キャッシュ付き)
 # ------------------------------------------------------------
@@ -409,6 +421,12 @@ init_state()
 st.title("HSV + スーパーピクセル セグメンテーションアプリ")
 st.caption("タブ①でHSV値により大雑把にマスクし、タブ②でスーパーピクセル単位で修正、ダウンロードタブから保存できます。")
 
+compress_for_work = st.checkbox(
+    "作業中は画像を縮小・圧縮して高速化し、ダウンロード時に元の解像度へ戻す",
+    value=True,
+    help="CR2などの高解像度画像で処理が重い場合に有効にしてください。長辺を最大1024pxに縮小して作業し、ダウンロード時に元画像のサイズへ復元します。",
+)
+
 uploaded_file = st.file_uploader(
     "画像をアップロード (.jpg / .jpeg / .png / .heic / .cr2)",
     type=["jpg", "jpeg", "png", "heic", "heif", "cr2"],
@@ -422,7 +440,14 @@ file_bytes = uploaded_file.getvalue()
 file_key = f"{uploaded_file.name}_{len(file_bytes)}"
 
 with st.spinner("画像を読み込んでいます..."):
-    img_rgb = load_image_rgb(file_bytes, uploaded_file.name)
+    img_full_rgb = load_image_rgb(file_bytes, uploaded_file.name)
+
+orig_h, orig_w = img_full_rgb.shape[:2]
+
+if compress_for_work:
+    img_rgb = downscale_for_work(img_full_rgb, WORK_MAX_SIDE)
+else:
+    img_rgb = img_full_rgb
 
 img_h, img_w = img_rgb.shape[:2]
 
@@ -491,10 +516,20 @@ with tab1:
             v_max,
         )
 
-        # 新しい画像が読み込まれたら初期マスクをセット
+        # 新しい画像が読み込まれたら初期マスクをセット。圧縮切替時はサイズを追従させる
         if st.session_state.file_key != file_key:
             st.session_state.file_key = file_key
             st.session_state.work_mask = hsv_mask.copy()
+            st.session_state.last_click = None
+        elif st.session_state.work_mask is None or st.session_state.work_mask.shape != (img_h, img_w):
+            if st.session_state.work_mask is None:
+                st.session_state.work_mask = hsv_mask.copy()
+            else:
+                st.session_state.work_mask = cv2.resize(
+                    st.session_state.work_mask.astype(np.uint8),
+                    (img_w, img_h),
+                    interpolation=cv2.INTER_NEAREST,
+                ).astype(bool)
             st.session_state.last_click = None
 
     with col1_view:
@@ -608,26 +643,37 @@ with tab2:
 # ------------------------------------------------------------
 with tab3:
     st.subheader("ダウンロード")
-    binary_mask_u8 = (st.session_state.work_mask.astype(np.uint8)) * 255
+    if (img_h, img_w) != (orig_h, orig_w):
+        export_mask = cv2.resize(
+            st.session_state.work_mask.astype(np.uint8),
+            (orig_w, orig_h),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(bool)
+        st.caption(f"作業解像度: {img_w}×{img_h} px → 出力解像度: {orig_w}×{orig_h} px（元サイズに復元済み）")
+    else:
+        export_mask = st.session_state.work_mask
+        st.caption(f"出力解像度: {orig_w}×{orig_h} px")
+
+    binary_mask_u8 = (export_mask.astype(np.uint8)) * 255
     final_overlay = render_overlay(
-        img_rgb,
-        st.session_state.work_mask,
+        img_full_rgb,
+        export_mask,
         None,
         mask_color=selected_mask_color,
         show_boundaries=False,
     )
 
-    mask_ratio = float(np.mean(st.session_state.work_mask) * 100.0)
+    mask_ratio = float(np.mean(export_mask) * 100.0)
     st.metric("マスク面積率", f"{mask_ratio:.2f}%")
 
     base_name = os.path.splitext(uploaded_file.name)[0]
     dl_col1, dl_col2, dl_col3 = st.columns(3)
 
     with dl_col1:
-        st.image(img_rgb, caption="元画像", use_container_width=True)
+        st.image(img_full_rgb, caption="元画像", use_container_width=True)
         st.download_button(
             label="元画像をダウンロード (PNG)",
-            data=encode_png(img_rgb),
+            data=encode_png(img_full_rgb),
             file_name=f"{base_name}_original.png",
             mime="image/png",
             use_container_width=True,
