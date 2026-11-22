@@ -1,3 +1,4 @@
+import inspect
 import io
 import os
 import tempfile
@@ -21,39 +22,7 @@ st.set_page_config(
     layout="wide",
 )
 
-DISPLAY_WIDTH = 750
-
-# 各カラムの下端を揃えるためのCSS
-st.markdown(
-    """
-    <style>
-    div[data-testid="stHorizontalBlock"] {
-        align-items: stretch !important;
-    }
-    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"],
-    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
-        display: flex !important;
-        flex-direction: column !important;
-    }
-    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] > div,
-    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] > div,
-    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] div[data-testid="stVerticalBlockBorderWrapper"],
-    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] div[data-testid="stVerticalBlockBorderWrapper"] > div,
-    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] div[data-testid="stVerticalBlock"],
-    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] div[data-testid="stVerticalBlock"] {
-        height: 100% !important;
-        display: flex !important;
-        flex-direction: column !important;
-        flex: 1 1 auto !important;
-    }
-    div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] div[data-testid="stVerticalBlock"] > div:last-child,
-    div[data-testid="stHorizontalBlock"] > div[data-testid="column"] div[data-testid="stVerticalBlock"] > div:last-child {
-        margin-top: auto !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+DISPLAY_WIDTH = 600
 
 # ------------------------------------------------------------
 # 色相環カスタムコンポーネント (HTML5 Canvas ドラッグ対応)
@@ -544,17 +513,15 @@ with tab1:
         with prev_col2:
             st.image((hsv_mask.astype(np.uint8)) * 255, caption="HSVマスク（白黒）", use_container_width=True)
 
-        apply_clicked = st.button("このHSVマスクを②に反映", type="primary", use_container_width=True)
-
-    if apply_clicked:
-        st.session_state.work_mask = hsv_mask.copy()
-        st.success("HSVマスクを「②スーパーピクセルで修正」に反映しました。")
+        if st.button("このHSVマスクを②に反映", type="primary", use_container_width=True):
+            st.session_state.work_mask = hsv_mask.copy()
+            st.success("HSVマスクを「②スーパーピクセルで修正」に反映しました。")
 
 # ------------------------------------------------------------
 # タブ②: スーパーピクセルで修正
 # ------------------------------------------------------------
 with tab2:
-    col2_ctrl, col2_main, col2_mask = st.columns([1, 2, 1])
+    col2_ctrl, col2_main, col2_mask = st.columns([1, 1.8, 1.8])
 
     with col2_ctrl:
         st.subheader("設定")
@@ -595,11 +562,16 @@ with tab2:
             mask_color=selected_mask_color,
             show_boundaries=show_boundaries,
         )
-        disp_img, scale = resize_for_display(overlay_img, DISPLAY_WIDTH)
+        disp_img, _ = resize_for_display(overlay_img, DISPLAY_WIDTH)
+        disp_h, disp_w = disp_img.shape[:2]
+
+        coord_kwargs = {"key": "sp_canvas"}
+        if "use_column_width" in inspect.signature(streamlit_image_coordinates).parameters:
+            coord_kwargs["use_column_width"] = "always"
 
         coords = streamlit_image_coordinates(
             Image.fromarray(disp_img),
-            key="sp_canvas",
+            **coord_kwargs,
         )
 
         if coords is not None:
@@ -607,8 +579,10 @@ with tab2:
             if st.session_state.last_click != click_sig:
                 st.session_state.last_click = click_sig
 
-                orig_x = int(np.clip(round(coords["x"] / scale), 0, img_w - 1))
-                orig_y = int(np.clip(round(coords["y"] / scale), 0, img_h - 1))
+                rendered_w = coords.get("width", disp_w)
+                rendered_h = coords.get("height", disp_h)
+                orig_x = int(np.clip(round(coords["x"] * img_w / rendered_w), 0, img_w - 1))
+                orig_y = int(np.clip(round(coords["y"] * img_h / rendered_h), 0, img_h - 1))
 
                 if brush_radius == 0:
                     target_label = segments[orig_y, orig_x]
